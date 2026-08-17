@@ -1504,18 +1504,36 @@ public class HybridDocumentProcessor {
      * separate call to it (from {@code AutoTaggingProcessor.updatePages}) would still see the old
      * instance if we swapped in a new one here. Purely additive under one reserved, namespaced
      * key, so it's safe even if the underlying dictionary turns out to be shared with sibling
-     * pages. {@code PDResources#getFont} itself lazily resolves an unqueried name from the live
-     * underlying dictionary on first lookup and caches it from then on — since this reserved name
-     * is never queried before this method adds it, both this method's own idempotency check and
-     * the later tagging pass's resolution correctly see whatever's been added here.
+     * pages.
+     *
+     * <p><b>The presence-check below must read the raw COS {@code /Font} dictionary directly,
+     * never {@code PDResources#getFont}.</b> An earlier version of this method used
+     * {@code resources.getFont(OCR_FALLBACK_FONT_NAME) != null} as the idempotency check, on the
+     * assumption that {@code PDResources#getFont} lazily resolves an unqueried name from the live
+     * underlying dictionary on first lookup. That assumption is wrong: calling
+     * {@code getFont} for this name *before* it exists in the dictionary causes
+     * {@code PDResources} to cache a negative/stale result for that name, and it keeps returning
+     * that stale "not found" answer on every later call — including from
+     * {@code AutoTaggingProcessor.updatePages}'s tagging pass, on this exact same
+     * {@code PDResources} instance, even after the entry was added to the underlying COS
+     * dictionary in between. That caused {@code ChunksWriter} to resolve a null font for this
+     * page's synthesized OCR-fallback text and crash with an NPE (confirmed via targeted
+     * diagnostic logging against a real reproducing document: identical {@code PDPage}/
+     * {@code PDResources} object identity in both phases, yet the font was reported missing at
+     * tagging time). Reading the COS dictionary directly avoids ever querying
+     * {@code PDResources#getFont} for this name before the entry exists, so whatever caching it
+     * does on its first real call sees the correct state from the start.
      */
     private static void ensureOcrFallbackFont(PDPage page) {
         PDResources resources = page.getResources();
-        if (resources.getFont(OCR_FALLBACK_FONT_NAME) != null) {
-            return;
-        }
         COSObject resourcesObj = resources.getObject();
         COSObject fontDictObj = resourcesObj.getKey(ASAtom.getASAtom("Font"));
+        if (fontDictObj != null && !fontDictObj.empty()) {
+            COSObject existingEntry = fontDictObj.getKey(OCR_FALLBACK_FONT_NAME);
+            if (existingEntry != null && !existingEntry.empty()) {
+                return;
+            }
+        }
         if (fontDictObj == null || fontDictObj.empty()) {
             fontDictObj = COSDictionary.construct();
             resourcesObj.setKey(ASAtom.getASAtom("Font"), fontDictObj);
