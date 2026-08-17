@@ -1478,17 +1478,38 @@ public class HybridDocumentProcessor {
      * used to mutate whatever {@code PDPage#getResources()} returned in place, which silently
      * leaked this font (and a page-owned {@code /Font} dict) onto every sibling page sharing that
      * ancestor's resources.
+     *
+     * <p><b>The presence-check below must read the raw COS {@code /Font} dictionary directly,
+     * never {@code PDResources#getFont}.</b> An earlier version of this method used
+     * {@code resources.getFont(OCR_FALLBACK_FONT_NAME) != null} as the idempotency check, on the
+     * assumption that {@code PDResources#getFont} lazily resolves an unqueried name from the live
+     * underlying dictionary on first lookup. That assumption is wrong: calling
+     * {@code getFont} for this name *before* it exists in the dictionary causes
+     * {@code PDResources} to cache a negative/stale result for that name, and it keeps returning
+     * that stale "not found" answer on every later call — including from
+     * {@code AutoTaggingProcessor.updatePages}'s tagging pass, on this exact same
+     * {@code PDResources} instance, even after the entry was added to the underlying COS
+     * dictionary in between. That caused {@code ChunksWriter} to resolve a null font for this
+     * page's synthesized OCR-fallback text and crash with an NPE (confirmed via targeted
+     * diagnostic logging against a real reproducing document: identical {@code PDPage}/
+     * {@code PDResources} object identity in both phases, yet the font was reported missing at
+     * tagging time). Reading the COS dictionary directly avoids ever querying
+     * {@code PDResources#getFont} for this name before the entry exists, so whatever caching it
+     * does on its first real call sees the correct state from the start.
      */
     private static void ensureOcrFallbackFont(PDPage page) {
         PDResources resources = page.getResources();
-        if (resources != null && resources.getFont(OCR_FALLBACK_FONT_NAME) != null) {
-            return;
-        }
         if (resources == null || Boolean.TRUE.equals(page.isInheritedResources())) {
             resources = localizePageResources(page, resources);
         }
         COSObject resourcesObj = resources.getObject();
         COSObject fontDictObj = resourcesObj.getKey(ASAtom.getASAtom("Font"));
+        if (fontDictObj != null && !fontDictObj.empty()) {
+            COSObject existingEntry = fontDictObj.getKey(OCR_FALLBACK_FONT_NAME);
+            if (existingEntry != null && !existingEntry.empty()) {
+                return;
+            }
+        }
         if (fontDictObj == null || fontDictObj.empty()) {
             fontDictObj = COSDictionary.construct();
             resourcesObj.setKey(ASAtom.getASAtom("Font"), fontDictObj);
