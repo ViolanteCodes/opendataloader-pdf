@@ -31,6 +31,7 @@ import org.opendataloader.pdf.hybrid.HybridClient.HybridResponse;
 import org.opendataloader.pdf.hybrid.HybridClient.OutputFormat;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.opendataloader.pdf.hybrid.HybridConfig;
+import org.opendataloader.pdf.hybrid.TextSimilarity;
 import org.opendataloader.pdf.hybrid.HybridSchemaTransformer;
 import org.opendataloader.pdf.hybrid.TriageLogger;
 import org.opendataloader.pdf.hybrid.TriageProcessor;
@@ -1742,7 +1743,22 @@ public class HybridDocumentProcessor {
             return;
         }
 
-        recordTextSource(textNode, "stream", null);
+        // A node can overlap native text without that text being all of it (a paragraph that is
+        // partly native, partly image-only; a footer line sitting under an OCR'd banner). Replacing
+        // the whole node with the overlapping native chunks would silently drop the rest, so keep
+        // the OCR text unless the native text accounts for it — the check upstream ran in "auto"
+        // OCR mode until the OCR strategy was removed (c5f0d0c8).
+        String streamText = extractTextFromChunks(matched);
+        String ocrText = extractTextFromNode(textNode);
+        double similarity = TextSimilarity.similarity(streamText, ocrText);
+        if (!TextSimilarity.trustStream(streamText, ocrText, TextSimilarity.DEFAULT_THRESHOLD)) {
+            LOGGER.fine(() -> "enrichSingleTextNode: native text untrusted (sim="
+                + String.format("%.2f", similarity) + "), keeping OCR text for node at bbox ["
+                + String.format("%.1f,%.1f,%.1f,%.1f", nLeft, nBottom, nRight, nTop) + "]");
+            recordTextSource(textNode, "ocr-fallback", similarity);
+            return;
+        }
+        recordTextSource(textNode, "stream", similarity);
 
         // Replace the backend's text with the Java TextChunks that carry StreamInfo
         textNode.getColumns().clear();
@@ -1763,6 +1779,30 @@ public class HybridDocumentProcessor {
             }
         }
         return false;
+    }
+
+    /** Concatenated text of a list of chunks, space-separated. */
+    private static String extractTextFromChunks(List<TextChunk> chunks) {
+        StringBuilder sb = new StringBuilder();
+        for (TextChunk tc : chunks) {
+            if (sb.length() > 0) sb.append(' ');
+            sb.append(tc.getValue());
+        }
+        return sb.toString().trim();
+    }
+
+    /** Concatenated text of a SemanticTextNode's columns/lines/chunks. */
+    private static String extractTextFromNode(SemanticTextNode node) {
+        StringBuilder sb = new StringBuilder();
+        for (TextColumn col : node.getColumns()) {
+            for (TextLine line : col.getLines()) {
+                for (TextChunk chunk : line.getTextChunks()) {
+                    if (sb.length() > 0) sb.append(' ');
+                    sb.append(chunk.getValue());
+                }
+            }
+        }
+        return sb.toString().trim();
     }
 
     /**
@@ -1842,6 +1882,15 @@ public class HybridDocumentProcessor {
         }
         if (matched.isEmpty()) {
             LOGGER.fine(() -> "replaceLineChunksWithJava: no Java TextChunk inside list line");
+            return;
+        }
+
+        // Same guard as enrichSingleTextNode: only swap in the native chunks when they account
+        // for the line's OCR text, otherwise the image-only part of the line is lost.
+        String streamText = extractTextFromChunks(matched);
+        String ocrText = extractTextFromChunks(line.getTextChunks());
+        if (!TextSimilarity.trustStream(streamText, ocrText, TextSimilarity.DEFAULT_THRESHOLD)) {
+            LOGGER.fine(() -> "replaceLineChunksWithJava: native text untrusted, keeping OCR line");
             return;
         }
 
