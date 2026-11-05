@@ -232,6 +232,12 @@ public class HybridDocumentProcessor {
     private static final ASAtom HELVETICA = ASAtom.getASAtom("Helvetica");
     private static final float OCR_FALLBACK_FONT_SIZE = 10f;
 
+    // Text-state operators reset before the synthesized text is shown (see addTextStateReset).
+    private static final String CHAR_SPACING_OPERATOR = "Tc";
+    private static final String WORD_SPACING_OPERATOR = "Tw";
+    private static final String HORIZONTAL_SCALING_OPERATOR = "Tz";
+    private static final String TEXT_RISE_OPERATOR = "Ts";
+
     private HybridDocumentProcessor() {
         // Static utility class
     }
@@ -1616,13 +1622,13 @@ public class HybridDocumentProcessor {
      */
     private static void addTextStateReset(List<Object> tokens) {
         tokens.add(COSReal.construct(0).getDirectBase());
-        tokens.add(Operator.getOperator("Tc"));
+        tokens.add(Operator.getOperator(CHAR_SPACING_OPERATOR));
         tokens.add(COSReal.construct(0).getDirectBase());
-        tokens.add(Operator.getOperator("Tw"));
+        tokens.add(Operator.getOperator(WORD_SPACING_OPERATOR));
         tokens.add(COSReal.construct(100).getDirectBase());
-        tokens.add(Operator.getOperator("Tz"));
+        tokens.add(Operator.getOperator(HORIZONTAL_SCALING_OPERATOR));
         tokens.add(COSReal.construct(0).getDirectBase());
-        tokens.add(Operator.getOperator("Ts"));
+        tokens.add(Operator.getOperator(TEXT_RISE_OPERATOR));
     }
 
     /**
@@ -1634,8 +1640,7 @@ public class HybridDocumentProcessor {
      * @return a name no font on the page uses
      */
     private static ASAtom chooseOcrFallbackFontName(PDPage page) {
-        PDResources resources = page.getResources();
-        COSObject fonts = resources == null ? null : resources.getObject().getKey(FONT);
+        COSObject fonts = fontDictionaryOf(page);
         ASAtom name = OCR_FALLBACK_FONT_NAME;
         if (fonts == null || fonts.empty()) {
             return name;
@@ -1646,6 +1651,15 @@ public class HybridDocumentProcessor {
             name = ASAtom.getASAtom(OCR_FALLBACK_FONT_NAME.getValue() + n);
         }
         return name;
+    }
+
+    /**
+     * @param page the page whose font resources are wanted
+     * @return the page's {@code /Font} dictionary (inherited included), or null when it has none
+     */
+    private static COSObject fontDictionaryOf(PDPage page) {
+        PDResources resources = page.getResources();
+        return resources == null ? null : resources.getObject().getKey(FONT);
     }
 
     private static boolean isHelvetica(COSObject font) {
@@ -1664,7 +1678,7 @@ public class HybridDocumentProcessor {
      */
     private static void ensureOcrFallbackFont(PDPage page, ASAtom fontName) {
         PDResources resources = page.getResources();
-        COSObject existingFonts = resources == null ? null : resources.getObject().getKey(FONT);
+        COSObject existingFonts = fontDictionaryOf(page);
         if (existingFonts != null && !existingFonts.empty() && !existingFonts.getKey(fontName).empty()) {
             return; // chooseOcrFallbackFontName only leaves a name that is taken when it holds Helvetica
         }
