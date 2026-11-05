@@ -33,6 +33,10 @@ import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -42,8 +46,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * If enriching a later page fails, the caller falls back to the Java path, which has to find the
  * pages' content streams as they were. So the OCR-fallback text is added only after every page has
  * been enriched. Page 0 holds OCR-only text (it would be written into its content stream), page 1 a
- * table whose row is missing, which makes its enrichment throw: the failure that comes out must be
- * the one from page 1, not a failure of writing page 0.
+ * table whose row is missing, which makes its enrichment throw. The failure that comes out must be
+ * the one from page 1, and the OCR-fallback writing must never have started: it catches its own
+ * failures and logs a warning, so a warning in the log means page 0 was rewritten too early.
  */
 class HybridEnrichmentOrderTest {
 
@@ -70,11 +75,36 @@ class HybridEnrichmentOrderTest {
         filteredContents.put(0, new ArrayList<>());
         filteredContents.put(1, new ArrayList<>());
 
+        List<LogRecord> warnings = new ArrayList<>();
+        Handler collector = new Handler() {
+            @Override
+            public void publish(LogRecord record) {
+                if (record.getLevel().intValue() >= Level.WARNING.intValue()) {
+                    warnings.add(record);
+                }
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        Logger logger = Logger.getLogger(HybridDocumentProcessor.class.getCanonicalName());
+        logger.addHandler(collector);
+
         Method enrich = HybridDocumentProcessor.class.getDeclaredMethod("enrichBackendResults",
             Map.class, Map.class, HybridConfig.class, Map.class);
         enrich.setAccessible(true);
-        InvocationTargetException thrown = assertThrows(InvocationTargetException.class,
-            () -> enrich.invoke(null, backendResults, filteredContents, new HybridConfig(), new IdentityHashMap<>()));
+        InvocationTargetException thrown;
+        try {
+            thrown = assertThrows(InvocationTargetException.class,
+                () -> enrich.invoke(null, backendResults, filteredContents, new HybridConfig(), new IdentityHashMap<>()));
+        } finally {
+            logger.removeHandler(collector);
+        }
 
         StringBuilder frames = new StringBuilder();
         for (StackTraceElement frame : thrown.getCause().getStackTrace()) {
@@ -82,7 +112,7 @@ class HybridEnrichmentOrderTest {
         }
         assertTrue(frames.toString().contains("enrichTextStreamInfosRecursive"),
             "the failure is not the later page's enrichment:\n" + thrown.getCause() + "\n" + frames);
-        assertFalse(frames.toString().contains("rewritePageContentStream"),
-            "an earlier page was rewritten before the later page was enriched:\n" + frames);
+        assertFalse(warnings.stream().anyMatch(r -> r.getMessage().contains("synthesize invisible text")),
+            "an earlier page was rewritten before the later page was enriched: " + warnings);
     }
 }
