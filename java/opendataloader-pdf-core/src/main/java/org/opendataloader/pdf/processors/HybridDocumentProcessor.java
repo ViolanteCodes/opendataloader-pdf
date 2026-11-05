@@ -1640,11 +1640,16 @@ public class HybridDocumentProcessor {
         if (fonts == null || fonts.empty()) {
             return name;
         }
-        // getKey gives an empty object, not null, for a name nothing uses.
-        for (int n = 1; !fonts.getKey(name).empty(); n++) {
+        // getKey gives an empty object, not null, for a name nothing uses. A Helvetica already under the
+        // name (left by an earlier conversion, or added through a /Font dictionary pages share) is reused.
+        for (int n = 1; !fonts.getKey(name).empty() && !isHelvetica(fonts.getKey(name)); n++) {
             name = ASAtom.getASAtom(OCR_FALLBACK_FONT_NAME.getValue() + n);
         }
         return name;
+    }
+
+    private static boolean isHelvetica(COSObject font) {
+        return TYPE1.equals(font.getNameKey(SUBTYPE)) && HELVETICA.equals(font.getNameKey(BASE_FONT));
     }
 
     /**
@@ -1659,6 +1664,10 @@ public class HybridDocumentProcessor {
      */
     private static void ensureOcrFallbackFont(PDPage page, ASAtom fontName) {
         PDResources resources = page.getResources();
+        COSObject existingFonts = resources == null ? null : resources.getObject().getKey(FONT);
+        if (existingFonts != null && !existingFonts.empty() && !existingFonts.getKey(fontName).empty()) {
+            return; // chooseOcrFallbackFontName only leaves a name that is taken when it holds Helvetica
+        }
         if (resources == null || Boolean.TRUE.equals(page.isInheritedResources())) {
             resources = localizePageResources(page, resources);
         }

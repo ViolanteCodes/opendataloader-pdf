@@ -51,6 +51,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -162,11 +163,32 @@ class Issue669HybridOcrTextPositionTest {
         content.endText();
     }
 
-    private void assertOcrPosition(String name, NativeLine nativeLine) throws Exception {
-        assertOcrPosition(name, nativeLine, page -> { });
+    @Test
+    void anExistingHelveticaUnderTheFallbackNameIsReusedNotAddedAgain() throws Exception {
+        Path tagged = assertOcrPosition("reuse", (content, font, height) -> {
+            show(content, font, 12, 72, height - 72);
+        }, page -> {
+            PDResources resources = new PDResources();
+            resources.put(COSName.getPDFName("ODLOcrFallbackHelv"),
+                new PDType1Font(Standard14Fonts.FontName.HELVETICA));
+            page.setResources(resources);
+        });
+        try (PDDocument document = Loader.loadPDF(tagged.toFile())) {
+            long fallbackFonts = 0;
+            for (COSName fontName : document.getPage(0).getResources().getFontNames()) {
+                if (fontName.getName().startsWith("ODLOcrFallbackHelv")) {
+                    fallbackFonts++;
+                }
+            }
+            assertEquals(1, fallbackFonts, "a second Helvetica was added next to the one already there");
+        }
     }
 
-    private void assertOcrPosition(String name, NativeLine nativeLine, Consumer<PDPage> pageSetup)
+    private Path assertOcrPosition(String name, NativeLine nativeLine) throws Exception {
+        return assertOcrPosition(name, nativeLine, page -> { });
+    }
+
+    private Path assertOcrPosition(String name, NativeLine nativeLine, Consumer<PDPage> pageSetup)
             throws Exception {
         PDRectangle a4 = PDRectangle.A4;
         Path pdf = tempDir.resolve(name + ".pdf");
@@ -204,7 +226,8 @@ class Issue669HybridOcrTextPositionTest {
 
         DocumentProcessor.processFile(pdf.toString(), config);
 
-        TextPosition ocr = ocrTextPosition(tempDir.resolve(name + "_tagged.pdf"));
+        Path taggedPdf = tempDir.resolve(name + "_tagged.pdf");
+        TextPosition ocr = ocrTextPosition(taggedPdf);
         assertNotNull(ocr, "the OCR text is not extractable from the tagged PDF");
         assertTrue(ocr.getFont().getName().contains("Helvetica"),
             "the OCR text is shown in " + ocr.getFont().getName() + ", not the fallback Helvetica");
@@ -212,6 +235,7 @@ class Issue669HybridOcrTextPositionTest {
         assertTrue(Math.abs(position.x - OCR_LEFT) < TOLERANCE && Math.abs(position.y - OCR_BASELINE) < TOLERANCE,
             "the OCR text is at (" + position.x + ", " + position.y + "), not where the backend put it ("
                 + OCR_LEFT + ", " + OCR_BASELINE + ")");
+        return taggedPdf;
     }
 
     /**
