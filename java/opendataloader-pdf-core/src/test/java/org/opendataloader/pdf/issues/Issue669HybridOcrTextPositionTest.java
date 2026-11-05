@@ -18,9 +18,11 @@ package org.opendataloader.pdf.issues;
 import mockwebserver3.MockResponse;
 import mockwebserver3.MockWebServer;
 import org.apache.pdfbox.Loader;
+import org.apache.pdfbox.cos.COSName;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.pdmodel.PDPageContentStream;
+import org.apache.pdfbox.pdmodel.PDResources;
 import org.apache.pdfbox.pdmodel.common.PDRectangle;
 import org.apache.pdfbox.pdmodel.font.PDType1Font;
 import org.apache.pdfbox.pdmodel.font.Standard14Fonts;
@@ -47,6 +49,7 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -122,6 +125,34 @@ class Issue669HybridOcrTextPositionTest {
         });
     }
 
+    @Test
+    void ocrTextIsWhereTheBackendPutItWhenTheNativeLineLeavesTextStateSet() throws Exception {
+        assertOcrPosition("textstate", (content, font, height) -> {
+            // Set outside any text object, so it is in force wherever the OCR text is put.
+            content.setTextRise(40);
+            content.setCharacterSpacing(5);
+            content.setWordSpacing(9);
+            content.setHorizontalScaling(150);
+            content.beginText();
+            content.setFont(font, 12);
+            content.newLineAtOffset(72, height - 72 - 40);
+            content.showText(FIRST);
+            content.endText();
+        });
+    }
+
+    @Test
+    void ocrTextUsesHelveticaWhenThePageAlreadyHasAFontUnderTheFallbackName() throws Exception {
+        assertOcrPosition("fontname", (content, font, height) -> {
+            show(content, font, 12, 72, height - 72);
+        }, page -> {
+            PDResources resources = new PDResources();
+            resources.put(COSName.getPDFName("ODLOcrFallbackHelv"),
+                new PDType1Font(Standard14Fonts.FontName.COURIER));
+            page.setResources(resources);
+        });
+    }
+
     private static void show(PDPageContentStream content, PDType1Font font, float size, float x, float y)
             throws IOException {
         content.beginText();
@@ -132,11 +163,17 @@ class Issue669HybridOcrTextPositionTest {
     }
 
     private void assertOcrPosition(String name, NativeLine nativeLine) throws Exception {
+        assertOcrPosition(name, nativeLine, page -> { });
+    }
+
+    private void assertOcrPosition(String name, NativeLine nativeLine, Consumer<PDPage> pageSetup)
+            throws Exception {
         PDRectangle a4 = PDRectangle.A4;
         Path pdf = tempDir.resolve(name + ".pdf");
         try (PDDocument document = new PDDocument()) {
             PDPage page = new PDPage(a4);
             document.addPage(page);
+            pageSetup.accept(page);
             BufferedImage raster = new BufferedImage(600, 400, BufferedImage.TYPE_INT_RGB);
             Graphics2D graphics = raster.createGraphics();
             graphics.setColor(new Color(200, 200, 200));
@@ -167,8 +204,11 @@ class Issue669HybridOcrTextPositionTest {
 
         DocumentProcessor.processFile(pdf.toString(), config);
 
-        Point2D.Float position = positionOfOcrText(tempDir.resolve(name + "_tagged.pdf"), a4.getHeight());
-        assertNotNull(position, "the OCR text is not extractable from the tagged PDF");
+        TextPosition ocr = ocrTextPosition(tempDir.resolve(name + "_tagged.pdf"));
+        assertNotNull(ocr, "the OCR text is not extractable from the tagged PDF");
+        assertTrue(ocr.getFont().getName().contains("Helvetica"),
+            "the OCR text is shown in " + ocr.getFont().getName() + ", not the fallback Helvetica");
+        Point2D.Float position = new Point2D.Float(ocr.getX(), a4.getHeight() - ocr.getYDirAdj());
         assertTrue(Math.abs(position.x - OCR_LEFT) < TOLERANCE && Math.abs(position.y - OCR_BASELINE) < TOLERANCE,
             "the OCR text is at (" + position.x + ", " + position.y + "), not where the backend put it ("
                 + OCR_LEFT + ", " + OCR_BASELINE + ")");
@@ -176,11 +216,9 @@ class Issue669HybridOcrTextPositionTest {
 
     /**
      * @param tagged the converted PDF
-     * @param pageHeight the page height, to turn the extractor's top-down y into a baseline
-     * @return the left edge and baseline of the OCR text in the extracted text, in page coordinates, or
-     *     null when the text is not in the extraction
+     * @return the first character of the OCR text in the extraction, or null when it is not there
      */
-    private static Point2D.Float positionOfOcrText(Path tagged, float pageHeight) throws IOException {
+    private static TextPosition ocrTextPosition(Path tagged) throws IOException {
         List<TextPosition> positions = new ArrayList<>();
         try (PDDocument document = Loader.loadPDF(tagged.toFile())) {
             new PDFTextStripper() {
@@ -199,8 +237,7 @@ class Issue669HybridOcrTextPositionTest {
         if (index < 0) {
             return null;
         }
-        TextPosition first = positions.get(index);
-        return new Point2D.Float(first.getX(), pageHeight - first.getYDirAdj());
+        return positions.get(index);
     }
 
     private static String node(String text, float left, float top, float right, float bottom) {

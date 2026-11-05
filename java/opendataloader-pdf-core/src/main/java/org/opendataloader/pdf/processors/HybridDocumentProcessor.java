@@ -1292,6 +1292,7 @@ public class HybridDocumentProcessor {
             alignToTopLevelBoundaries(originalTokens, pendingByInsertIndex);
 
         // The shift an insertion causes is the length of the block, so build the blocks first.
+        ASAtom fontName = chooseOcrFallbackFontName(page);
         AffineTransform[] ctmBefore = ctmBeforeEachToken(originalTokens);
         int[] tokensInsertedBefore = new int[originalLength + 1];
         Map<Integer, List<SynthesizedBlock>> blocksBefore = new HashMap<>();
@@ -1310,7 +1311,7 @@ public class HybridDocumentProcessor {
             }
             List<SynthesizedBlock> blocks = new ArrayList<>();
             for (TextChunk chunk : entry.getValue()) {
-                SynthesizedBlock block = buildSynthesizedBlock(chunk, undo);
+                SynthesizedBlock block = buildSynthesizedBlock(chunk, undo, fontName);
                 blocks.add(block);
                 tokensInsertedBefore[entry.getKey()] += block.tokens.size();
             }
@@ -1344,7 +1345,7 @@ public class HybridDocumentProcessor {
         }
 
         // Before the new stream is registered: a font left on the page is harmless, an orphan stream is not.
-        ensureOcrFallbackFont(page);
+        ensureOcrFallbackFont(page, fontName);
         COSDocument cosDocument = StaticResources.getDocument().getDocument();
         COSObject newContents = AutoTaggingProcessor.createContentsIndirect(cosDocument, finalTokens);
 
@@ -1568,9 +1569,11 @@ public class HybridDocumentProcessor {
      * @param chunk the OCR-fallback chunk; its position comes from its bounding box
      * @param undoCtm the inverse of the transformation matrix at the insertion point, or null when
      *     that matrix is the identity
+     * @param fontName the page's font resource name for the fallback font
      * @return the tokens, and where the {@code Tj} operator is among them
      */
-    private static SynthesizedBlock buildSynthesizedBlock(TextChunk chunk, AffineTransform undoCtm) {
+    private static SynthesizedBlock buildSynthesizedBlock(TextChunk chunk, AffineTransform undoCtm,
+            ASAtom fontName) {
         String text = toAsciiOrReplacementChar(chunk.getValue());
         List<Object> tokens = new ArrayList<>();
         tokens.add(Operator.getOperator(Operators.Q_GSAVE));
@@ -1583,11 +1586,14 @@ public class HybridDocumentProcessor {
             tokens.add(Operator.getOperator(Operators.CM_CONCAT));
         }
         tokens.add(Operator.getOperator(Operators.BT));
-        tokens.add(COSName.construct(OCR_FALLBACK_FONT_NAME).getDirectBase());
+        tokens.add(COSName.construct(fontName).getDirectBase());
         tokens.add(COSReal.construct(OCR_FALLBACK_FONT_SIZE).getDirectBase());
         tokens.add(Operator.getOperator(Operators.TF));
         tokens.add(COSInteger.construct(INVISIBLE_TEXT_RENDER_MODE).getDirectBase());
         tokens.add(Operator.getOperator(Operators.TR));
+        // Text state outlives ET: spacing, scaling and rise set by earlier native text would shift or
+        // stretch this text, so each is set to its default.
+        addTextStateReset(tokens);
         tokens.add(COSReal.construct(1).getDirectBase());
         tokens.add(COSReal.construct(0).getDirectBase());
         tokens.add(COSReal.construct(0).getDirectBase());
@@ -1604,20 +1610,55 @@ public class HybridDocumentProcessor {
     }
 
     /**
-     * Ensures the page has an {@link #OCR_FALLBACK_FONT_NAME} font resource, adding a minimal
-     * Standard-14 Helvetica entry if one isn't already present.
+     * Sets character spacing, word spacing, horizontal scaling and text rise to their defaults.
+     *
+     * @param tokens the block being built; the operators are appended to it
+     */
+    private static void addTextStateReset(List<Object> tokens) {
+        tokens.add(COSReal.construct(0).getDirectBase());
+        tokens.add(Operator.getOperator("Tc"));
+        tokens.add(COSReal.construct(0).getDirectBase());
+        tokens.add(Operator.getOperator("Tw"));
+        tokens.add(COSReal.construct(100).getDirectBase());
+        tokens.add(Operator.getOperator("Tz"));
+        tokens.add(COSReal.construct(0).getDirectBase());
+        tokens.add(Operator.getOperator("Ts"));
+    }
+
+    /**
+     * Picks the font resource name the synthesized text will use: {@link #OCR_FALLBACK_FONT_NAME}, or
+     * that name with a number after it when the page already has a font under it (say, a document
+     * this tool has converted before), so the text is never shown in the page's own font.
+     *
+     * @param page the page that will show the synthesized text
+     * @return a name no font on the page uses
+     */
+    private static ASAtom chooseOcrFallbackFontName(PDPage page) {
+        PDResources resources = page.getResources();
+        COSObject fonts = resources == null ? null : resources.getObject().getKey(FONT);
+        ASAtom name = OCR_FALLBACK_FONT_NAME;
+        if (fonts == null || fonts.empty()) {
+            return name;
+        }
+        // getKey gives an empty object, not null, for a name nothing uses.
+        for (int n = 1; !fonts.getKey(name).empty(); n++) {
+            name = ASAtom.getASAtom(OCR_FALLBACK_FONT_NAME.getValue() + n);
+        }
+        return name;
+    }
+
+    /**
+     * Adds a minimal Standard-14 Helvetica font resource under {@code fontName} to the page.
      *
      * <p>If the page has no {@code /Resources} of its own (inherited from an ancestor /Pages node,
      * or missing entirely), {@link #localizePageResources} gives it a page-owned copy first, so the
      * font is not added to the resources that sibling pages share.
      *
      * @param page the page that will show the synthesized text
+     * @param fontName the name from {@link #chooseOcrFallbackFontName}, which no font on the page has
      */
-    private static void ensureOcrFallbackFont(PDPage page) {
+    private static void ensureOcrFallbackFont(PDPage page, ASAtom fontName) {
         PDResources resources = page.getResources();
-        if (resources != null && resources.getFont(OCR_FALLBACK_FONT_NAME) != null) {
-            return;
-        }
         if (resources == null || Boolean.TRUE.equals(page.isInheritedResources())) {
             resources = localizePageResources(page, resources);
         }
@@ -1631,7 +1672,7 @@ public class HybridDocumentProcessor {
         fontEntry.setKey(ASAtom.TYPE, COSName.construct(FONT));
         fontEntry.setKey(SUBTYPE, COSName.construct(TYPE1));
         fontEntry.setKey(BASE_FONT, COSName.construct(HELVETICA));
-        fontDictObj.setKey(OCR_FALLBACK_FONT_NAME, fontEntry);
+        fontDictObj.setKey(fontName, fontEntry);
     }
 
     /**
