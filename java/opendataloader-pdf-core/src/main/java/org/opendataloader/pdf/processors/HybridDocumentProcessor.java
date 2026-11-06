@@ -392,7 +392,7 @@ public class HybridDocumentProcessor {
             backendResults = processBackendPath(inputPdfName, backendPages, config, backendFailedPages);
             // Enrich backend results: copy StreamInfos from Java-extracted content for MCID linkage
             enrichBackendResults(backendResults, filteredContents, config.getHybridConfig(),
-                config.isGenerateTaggedPDF() || config.isGeneratePDF(), pictureSwapOriginalIds);
+                config.isGenerateTaggedPDF(), pictureSwapOriginalIds);
         } catch (Exception e) {
             LOGGER.log(Level.WARNING, "Backend processing failed: {0}", e.getMessage());
             if (config.getHybridConfig().isFallbackToJava()) {
@@ -937,20 +937,21 @@ public class HybridDocumentProcessor {
     }
 
     /**
-     * As above; {@code generatePdfContent} says whether a PDF output is requested, which is the only
-     * case that reads the page content stream the OCR-fallback synthesis rewrites.
+     * As above; {@code generateTaggedPdf} says whether a tagged PDF is requested, which is the only
+     * output that reads the page content stream the OCR-fallback synthesis rewrites (the plain PDF
+     * output loads the original file again).
      *
      * @param backendResults the backend's elements per page; enriched in place
      * @param filteredContents the natively extracted content per page, which carries the StreamInfos
      * @param hybridConfig the hybrid settings
-     * @param generatePdfContent whether the OCR-fallback text is synthesized into the content stream
+     * @param generateTaggedPdf whether the OCR-fallback text is synthesized into the content stream
      * @param pictureSwapOriginalIds filled with the original id of each picture that is swapped
      */
     private static void enrichBackendResults(
             Map<Integer, List<IObject>> backendResults,
             Map<Integer, List<IObject>> filteredContents,
             HybridConfig hybridConfig,
-            boolean generatePdfContent,
+            boolean generateTaggedPdf,
             Map<EnrichedImageChunk, Long> pictureSwapOriginalIds) {
 
         for (Map.Entry<Integer, List<IObject>> entry : backendResults.entrySet()) {
@@ -1061,11 +1062,12 @@ public class HybridDocumentProcessor {
 
         // OCR fallback: synthesize real (invisible) content for backend elements that still
         // lack StreamInfo after enrichment — see synthesizeInvisibleTextForOcrFallback.
-        // Only when a PDF output is requested: the JSON, Markdown, HTML and text writers do not
-        // read the page content stream, so rewriting it would be wasted work (and a risk).
+        // Only when a tagged PDF is requested: the JSON, Markdown, HTML and text writers, and the
+        // plain PDF writer (it loads the original file), do not read the rewritten content stream,
+        // so rewriting it would be wasted work (and a risk).
         // A second pass, after every page is enriched: if enriching a later page fails, the caller
         // falls back to the Java path, which has to find the content streams as they were.
-        if (generatePdfContent) {
+        if (generateTaggedPdf) {
             for (Map.Entry<Integer, List<IObject>> entry : backendResults.entrySet()) {
                 synthesizeInvisibleTextForOcrFallback(entry.getValue(), entry.getKey());
             }
